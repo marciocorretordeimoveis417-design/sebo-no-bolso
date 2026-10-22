@@ -2,9 +2,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { getSignedInUser } from "@/lib/supabase";
 
+export type PapelSebo = "dono" | "funcionario" | "";
+
 export type SeboAtivo = {
   id: string;
   nome: string;
+  papel: PapelSebo;
+  codigoConvite: string;
 };
 
 let memory: SeboAtivo | null = null;
@@ -60,54 +64,87 @@ function readNome(value: unknown): string {
   return "";
 }
 
-async function nomeDoSebo(client: SupabaseClient, seboId: string): Promise<string> {
-  const byNome = await client.from("sebos").select("id, nome").eq("id", seboId).maybeSingle();
-  if (!byNome.error) {
-    return readNome(byNome.data);
+function readPapel(value: unknown): PapelSebo {
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (text === "dono" || text === "funcionario") {
+    return text;
   }
 
-  if (!/nome/i.test(byNome.error.message)) {
+  return "";
+}
+
+function readCodigo(value: unknown): string {
+  if (!value || typeof value !== "object") {
     return "";
   }
 
-  const byNomeSebo = await client.from("sebos").select("id, nome_sebo").eq("id", seboId).maybeSingle();
+  const code = (value as Record<string, unknown>).codigo_convite;
+  if (typeof code === "string") {
+    return code.trim();
+  }
+
+  if (typeof code === "number" && Number.isFinite(code)) {
+    return String(code).padStart(8, "0");
+  }
+
+  return "";
+}
+
+async function detalhesDoSebo(
+  client: SupabaseClient,
+  seboId: string,
+): Promise<{ nome: string; codigoConvite: string }> {
+  const full = await client.from("sebos").select("id, nome, codigo_convite").eq("id", seboId).maybeSingle();
+  if (!full.error) {
+    return { nome: readNome(full.data) || "Sebo", codigoConvite: readCodigo(full.data) };
+  }
+
+  if (/codigo_convite/i.test(full.error.message)) {
+    const byNome = await client.from("sebos").select("id, nome").eq("id", seboId).maybeSingle();
+    return { nome: byNome.error ? "Sebo" : readNome(byNome.data) || "Sebo", codigoConvite: "" };
+  }
+
+  const byNomeSebo = await client.from("sebos").select("id, nome_sebo, codigo_convite").eq("id", seboId).maybeSingle();
   if (byNomeSebo.error) {
-    return "";
+    return { nome: "Sebo", codigoConvite: "" };
   }
 
-  return readNome(byNomeSebo.data);
+  return { nome: readNome(byNomeSebo.data) || "Sebo", codigoConvite: readCodigo(byNomeSebo.data) };
 }
 
 async function seboPeloVinculo(client: SupabaseClient, usuarioId: string): Promise<SeboAtivo | null> {
   const membership = await client
     .from("membros_sebo")
-    .select("sebo_id")
+    .select("sebo_id, papel")
     .eq("usuario_id", usuarioId)
     .limit(1)
     .maybeSingle();
 
   let seboId = membership.error ? "" : readId(membership.data?.sebo_id);
+  let papel = membership.error ? "" : readPapel(membership.data?.papel);
 
   if (!seboId && membership.error && /usuario_id/i.test(membership.error.message)) {
-    const alternate = await client.from("membros_sebo").select("sebo_id").eq("user_id", usuarioId).limit(1).maybeSingle();
+    const alternate = await client
+      .from("membros_sebo")
+      .select("sebo_id, papel")
+      .eq("user_id", usuarioId)
+      .limit(1)
+      .maybeSingle();
     seboId = alternate.error ? "" : readId(alternate.data?.sebo_id);
+    papel = alternate.error ? "" : readPapel(alternate.data?.papel);
   }
 
   if (!seboId) {
     const rpc = await client.rpc("obter_sebo_usuario");
     seboId = rpc.error ? "" : readId(rpc.data);
-    const nomeRpc = rpc.error ? "" : readNome(Array.isArray(rpc.data) ? rpc.data[0] : rpc.data);
-    if (seboId && nomeRpc) {
-      return { id: seboId, nome: nomeRpc };
-    }
   }
 
   if (!seboId) {
     return null;
   }
 
-  const nome = await nomeDoSebo(client, seboId);
-  return { id: seboId, nome: nome || "Sebo" };
+  const detalhes = await detalhesDoSebo(client, seboId);
+  return { id: seboId, papel, ...detalhes };
 }
 
 async function fetchSebo(client: SupabaseClient, ticket: number): Promise<SeboAtivo | null> {

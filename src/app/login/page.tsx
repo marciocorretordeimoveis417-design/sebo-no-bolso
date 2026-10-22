@@ -1,15 +1,19 @@
 "use client";
 
 import { BrandMark } from "@/components/brand-mark";
+import { clearSeboAtivo } from "@/lib/sebo-ativo";
 import { getSupabase, insertPerfil, isSupabaseConfigured } from "@/lib/supabase";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 type Mode = "login" | "register";
+type ContaPapel = "dono" | "funcionario";
 
 type FormState = {
   nome: string;
+  convite: string;
   email: string;
   password: string;
   confirmPassword: string;
@@ -17,10 +21,85 @@ type FormState = {
 
 const emptyForm: FormState = {
   nome: "",
+  convite: "",
   email: "",
   password: "",
   confirmPassword: "",
 };
+
+function codigoAleatorio(): string {
+  const buffer = new Uint32Array(1);
+  crypto.getRandomValues(buffer);
+  return String(buffer[0] % 100_000_000).padStart(8, "0");
+}
+
+async function buscarSeboPorConvite(
+  client: SupabaseClient,
+  codigo: string,
+): Promise<{ id: string; nome: string } | { error: string }> {
+  const { data, error } = await client.from("sebos").select("id, nome").eq("codigo_convite", codigo).maybeSingle();
+
+  if (error) {
+    return { error: error.message };
+  }
+
+  if (!data?.id) {
+    return { error: "Código de convite não encontrado" };
+  }
+
+  const nome = typeof data.nome === "string" && data.nome.trim() ? data.nome.trim() : "Sebo";
+  return { id: data.id, nome };
+}
+
+async function criarSeboDoDono(client: SupabaseClient, nome: string): Promise<{ id: string } | { error: string }> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const inserted = await client
+      .from("sebos")
+      .insert({ nome, codigo_convite: codigoAleatorio() })
+      .select("id")
+      .single();
+
+    if (!inserted.error && inserted.data?.id) {
+      return { id: inserted.data.id };
+    }
+
+    if (inserted.error?.code === "23505") {
+      continue;
+    }
+
+    if (inserted.error && /codigo_convite/i.test(inserted.error.message)) {
+      const plain = await client.from("sebos").insert({ nome }).select("id").single();
+      if (!plain.error && plain.data?.id) {
+        return { id: plain.data.id };
+      }
+
+      return { error: plain.error?.message ?? "Não foi possível criar o sebo." };
+    }
+
+    return { error: inserted.error?.message ?? "Não foi possível criar o sebo." };
+  }
+
+  return { error: "Não foi possível gerar o código de convite." };
+}
+
+async function vincularMembro(
+  client: SupabaseClient,
+  seboId: string,
+  usuarioId: string,
+  papel: ContaPapel,
+): Promise<string | null> {
+  const { error } = await client.from("membros_sebo").insert({
+    sebo_id: seboId,
+    usuario_id: usuarioId,
+    papel,
+  });
+
+  if (!error || error.code === "23505") {
+    return null;
+  }
+
+  return error.message;
+}
 
 const fieldClassName =
   "h-12 w-full rounded-md border border-rule bg-card px-3 text-base text-ink outline-none transition-colors placeholder:text-ink/35 focus:border-ink";
@@ -55,12 +134,16 @@ function mapAuthError(message: string): string {
   return message;
 }
 
-function validate(mode: Mode, values: FormState): string | null {
+function validate(mode: Mode, papel: ContaPapel, values: FormState): string | null {
   const nome = values.nome.trim();
   const email = values.email.trim();
 
-  if (mode === "register" && nome.length < 2) {
-    return "Informe seu nome.";
+  if (mode === "register" && papel === "dono" && nome.length < 2) {
+    return "Informe o nome do sebo.";
+  }
+
+  if (mode === "register" && papel === "funcionario" && !/^\d{8}$/.test(values.convite)) {
+    return "Informe o código de convite com 8 dígitos.";
   }
 
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -81,6 +164,7 @@ function validate(mode: Mode, values: FormState): string | null {
 export default function LoginPage() {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("login");
+  const [papel, setPapel] = useState<ContaPapel>("dono");
   const [form, setForm] = useState<FormState>(emptyForm);
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -136,7 +220,7 @@ export default function LoginPage() {
     setError(null);
     setNotice(null);
 
-    const validationError = validate(mode, form);
+    const validationError = validate(mode, papel, form);
     if (validationError) {
       setError(validationError);
       return;
@@ -149,11 +233,25 @@ export default function LoginPage() {
 
     try {
       if (mode === "register") {
+        let seboId = "";
+        let nomeSebo = nome;
+
+        if (papel === "funcionario") {
+          const encontrado = await buscarSeboPorConvite(supabase, form.convite);
+          if ("error" in encontrado) {
+            setError(encontrado.error);
+            return;
+          }
+
+          seboId = encontrado.id;
+          nomeSebo = encontrado.nome;
+        }
+
         const { data, error: signUpError } = await supabase.auth.signUp({
           email,
           password: form.password,
           options: {
-            data: { nome_sebo: nome },
+            data: { nome_sebo: nomeSebo },
             emailRedirectTo: `${window.location.origin}/login`,
           },
         });
@@ -174,27 +272,43 @@ export default function LoginPage() {
           return;
         }
 
-        const perfilError = await insertPerfil(supabase, {
-          id: data.user.id,
-          nome_sebo: nome,
-        });
+        if (papel === "dono") {
+          const criado = await criarSeboDoDono(supabase, nome);
+          if ("error" in criado) {
+            setError(
+              data.session
+                ? `A conta foi criada, mas a loja não foi salva: ${criado.error}`
+                : `Conta criada. Confirme o e-mail para entrar. A loja não foi salva: ${criado.error}`,
+            );
+            return;
+          }
 
-        if (perfilError) {
+          seboId = criado.id;
+        }
+
+        const membroError = await vincularMembro(supabase, seboId, data.user.id, papel);
+        if (membroError) {
           setError(
             data.session
-              ? `A conta foi criada, mas o perfil não foi salvo: ${perfilError}`
-              : `Conta criada. Confirme o e-mail para entrar. O perfil será gravado nesse momento. Detalhe: ${perfilError}`,
+              ? `A conta foi criada, mas o vínculo com o sebo não foi salvo: ${membroError}`
+              : `Conta criada. Confirme o e-mail para entrar. O vínculo não foi salvo: ${membroError}`,
           );
           return;
         }
 
+        await insertPerfil(supabase, {
+          id: data.user.id,
+          nome_sebo: nomeSebo,
+        });
+
         if (!data.session) {
-          setNotice("Conta criada e perfil salvo. Confirme o e-mail para entrar.");
+          setNotice("Conta criada. Confirme o e-mail para entrar.");
           setForm((current) => ({ ...current, password: "", confirmPassword: "" }));
           setMode("login");
           return;
         }
 
+        clearSeboAtivo();
         router.replace("/dashboard");
         return;
       }
@@ -284,15 +398,62 @@ export default function LoginPage() {
 
                 <form className="mt-6 space-y-4" onSubmit={handleSubmit} noValidate>
                   {mode === "register" ? (
+                    <div role="radiogroup" aria-label="Tipo de conta" className="grid gap-2">
+                      {(
+                        [
+                          ["dono", "Sou Dono de Sebo (Criar nova loja)"],
+                          ["funcionario", "Sou Funcionário (Entrar em loja existente)"],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          role="radio"
+                          aria-checked={papel === id}
+                          onClick={() => {
+                            setPapel(id);
+                            setError(null);
+                          }}
+                          className={`rounded-lg border px-3 py-3 text-left text-sm font-medium ${
+                            papel === id
+                              ? "border-[#18794a] bg-[#18794a]/10 text-[#18794a]"
+                              : "border-rule text-ink/70"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {mode === "register" && papel === "dono" ? (
                     <label className="block space-y-2">
-                      <span className="text-sm font-medium text-ink">Nome</span>
+                      <span className="text-sm font-medium text-ink">Nome do Sebo</span>
                       <input
-                        name="name"
-                        autoComplete="name"
+                        name="nome"
+                        autoComplete="organization"
+                        required
                         value={form.nome}
                         onChange={(event) => updateField("nome", event.target.value)}
                         className={fieldClassName}
-                        placeholder="Como aparece no perfil"
+                        placeholder="Nome da loja"
+                      />
+                    </label>
+                  ) : null}
+
+                  {mode === "register" && papel === "funcionario" ? (
+                    <label className="block space-y-2">
+                      <span className="text-sm font-medium text-ink">Código de Convite (8 dígitos)</span>
+                      <input
+                        name="convite"
+                        inputMode="numeric"
+                        autoComplete="off"
+                        required
+                        maxLength={8}
+                        value={form.convite}
+                        onChange={(event) => updateField("convite", event.target.value.replace(/\D/g, "").slice(0, 8))}
+                        className={fieldClassName}
+                        placeholder="00000000"
                       />
                     </label>
                   ) : null}

@@ -797,7 +797,7 @@ export default function DashboardPage() {
   if (!ready) {
     return (
       <div className="ledger flex flex-1 flex-col">
-        <SeboHeader nome={seboAtivo?.nome ?? ""} />
+        <SeboHeader nome={seboAtivo?.nome ?? ""} convite={seboAtivo?.papel === "dono" ? seboAtivo.codigoConvite : ""} />
         <div className="flex flex-1 items-center justify-center px-5">
           <p className="text-sm text-ink/60">Abrindo o acervo…</p>
         </div>
@@ -807,7 +807,7 @@ export default function DashboardPage() {
 
   return (
     <div className="ledger flex flex-1 flex-col">
-      <SeboHeader nome={seboAtivo?.nome ?? ""} />
+      <SeboHeader nome={seboAtivo?.nome ?? ""} convite={seboAtivo?.papel === "dono" ? seboAtivo.codigoConvite : ""} />
       <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 py-6 md:px-8 md:py-12">
         <h1 className="font-serif text-4xl leading-none tracking-tight text-ink md:text-6xl">Acervo</h1>
         <p className="mt-3 max-w-md text-sm leading-6 text-ink/70">
