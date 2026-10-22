@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { NextResponse } from "next/server";
+import { buscarPrecoUsado } from "@/lib/mercadolivre-precos";
 
 const PROMPT =
   "Analise a imagem 1 (capa do livro) para extrair o Título, Autor e Editora. Faça o OCR detalhado da imagem 2 (página de créditos/ficha catalográfica interna do livro) para extrair estritamente o ISBN e o Ano de Publicação correto, ignorando outras datas secundárias da página. Além de extrair os dados textuais das imagens, utilize o seu conhecimento de mercado para estimar o valor médio de venda atual deste livro usado no mercado brasileiro (baseando-se em referências como Estante Virtual, Amazon Brasil e Mercado Livre). Calcule um preço mínimo sugerido e um preço máximo sugerido para o estado do livro analisado. O JSON de retorno da API deve ser estendido e conter obrigatoriamente as chaves exatas: title, author, publisher, isbn, year, preco_minimo_sugerido, preco_maximo_sugerido. preco_minimo_sugerido e preco_maximo_sugerido devem ser números decimais puros em reais, sem símbolo de moeda, sem texto e sem separador de milhar. O mínimo não pode ser maior que o máximo.";
@@ -12,6 +13,7 @@ type BookFields = {
   year: string;
   preco_minimo_sugerido: number;
   preco_maximo_sugerido: number;
+  origem_preco: "mercadolivre" | "estimado";
 };
 
 function isImageFile(value: FormDataEntryValue | null): value is File {
@@ -255,14 +257,17 @@ export async function POST(request: Request) {
 
     const data = readJson(response.text);
     const prices = priceRange(data.preco_minimo_sugerido, data.preco_maximo_sugerido);
+    const isbn = cleanIsbn(asText(data.isbn));
+    const mercado = isbn ? await buscarPrecoUsado(isbn) : null;
     const book: BookFields = {
       title: asText(data.title),
       author: asText(data.author),
       publisher: asText(data.publisher),
-      isbn: cleanIsbn(asText(data.isbn)),
+      isbn,
       year: cleanYear(asText(data.year)),
-      preco_minimo_sugerido: prices?.min ?? 0,
-      preco_maximo_sugerido: prices?.max ?? 0,
+      preco_minimo_sugerido: mercado?.minimo ?? prices?.min ?? 0,
+      preco_maximo_sugerido: mercado?.maximo ?? prices?.max ?? 0,
+      origem_preco: mercado ? "mercadolivre" : "estimado",
     };
 
     return NextResponse.json(book);

@@ -19,12 +19,14 @@ type ExtractedBook = {
   year?: string | number;
   preco_minimo_sugerido?: number;
   preco_maximo_sugerido?: number;
+  origem_preco?: string;
   error?: string;
 };
 
 type FaixaPreco = {
   minimo: number;
   maximo: number;
+  origem: "mercadolivre" | "estimado";
 };
 
 const CONDITIONS: { id: Condition; label: string }[] = [
@@ -101,7 +103,7 @@ function readSuggestedPrice(value: unknown): number | null {
   return Math.round(value * 100) / 100;
 }
 
-function readFaixaPreco(minValue: unknown, maxValue: unknown): FaixaPreco | null {
+function readFaixaPreco(minValue: unknown, maxValue: unknown, origem: unknown): FaixaPreco | null {
   const minimo = readSuggestedPrice(minValue);
   const maximo = readSuggestedPrice(maxValue);
   if (minimo === null || maximo === null || Math.max(minimo, maximo) <= 0) {
@@ -111,6 +113,7 @@ function readFaixaPreco(minValue: unknown, maxValue: unknown): FaixaPreco | null
   return {
     minimo: Math.min(minimo, maximo),
     maximo: Math.max(minimo, maximo),
+    origem: origem === "mercadolivre" ? "mercadolivre" : "estimado",
   };
 }
 
@@ -219,7 +222,11 @@ export default function CadastrarLivroPage() {
       setIsbn(isbnValue);
       setAno(year);
 
-      const faixa = readFaixaPreco(payload.preco_minimo_sugerido, payload.preco_maximo_sugerido);
+      const faixa = readFaixaPreco(
+        payload.preco_minimo_sugerido,
+        payload.preco_maximo_sugerido,
+        payload.origem_preco,
+      );
       setFaixaPreco(faixa);
       if (faixa) {
         const media = Math.round(((faixa.minimo + faixa.maximo) / 2) * 100) / 100;
@@ -682,8 +689,8 @@ export default function CadastrarLivroPage() {
               <aside className="rounded-md border border-[#b7d7b4] bg-[#e7f5e4] px-4 py-3">
                 <p className="text-sm font-semibold text-ink">💡 Sugestão de Preço Inteligente</p>
                 <p className="mt-1 text-sm leading-6 text-ink">
-                  Preço Sugerido de Mercado: R$ {formatSuggestedPrice(faixaPreco.minimo)} até R${" "}
-                  {formatSuggestedPrice(faixaPreco.maximo)}
+                  {faixaPreco.origem === "mercadolivre" ? "Preço Real de Mercado no ML" : "Preço Sugerido de Mercado"}: R${" "}
+                  {formatSuggestedPrice(faixaPreco.minimo)} até R$ {formatSuggestedPrice(faixaPreco.maximo)}
                 </p>
               </aside>
             ) : null}
