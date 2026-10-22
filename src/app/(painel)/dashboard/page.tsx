@@ -697,7 +697,6 @@ export default function DashboardPage() {
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busca, setBusca] = useState("");
-  const [aba, setAba] = useState<"catalogado" | "vendido">("catalogado");
 
   useEffect(() => {
     function closeDetail() {
@@ -790,7 +789,7 @@ export default function DashboardPage() {
   }, [router, seboAtivo]);
 
   const selected = books.find((book) => book.id === selectedId) ?? null;
-  const daAba = books.filter((book) => bookStatus(book) === aba);
+  const daAba = books.filter((book) => bookStatus(book) === "catalogado");
   const visiveis = daAba.filter((book) => matchesSearch(book, busca));
   const totalLabel = visiveis.length === 1 ? "Total: 1 livro" : `Total: ${visiveis.length} livros`;
 
@@ -824,28 +823,6 @@ export default function DashboardPage() {
           />
         </label>
 
-        <div className="mt-4 grid grid-cols-2 rounded-full border border-rule bg-card p-1" role="tablist" aria-label="Situação do estoque">
-          {(
-            [
-              ["catalogado", "Catalogados"],
-              ["vendido", "Vendidos"],
-            ] as const
-          ).map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              role="tab"
-              aria-selected={aba === id}
-              onClick={() => setAba(id)}
-              className={`h-10 rounded-full text-sm font-semibold ${
-                aba === id ? "bg-[#18794a] text-white" : "text-ink/60"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-
         <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm font-medium text-ink">{totalLabel}</p>
           <button
@@ -868,9 +845,7 @@ export default function DashboardPage() {
           <p className="mt-8 rounded-2xl border border-rule bg-card px-4 py-6 text-sm leading-6 text-ink/70">
             {busca.trim()
               ? "Nenhum livro encontrado para essa busca."
-              : aba === "vendido"
-                ? "Nenhum livro vendido ainda."
-                : "Nenhum livro catalogado ainda. Use Novo livro para incluir o primeiro."}
+              : "Nenhum livro catalogado ainda. Use Novo livro para incluir o primeiro."}
           </p>
         ) : (
           <ul className="mt-4 space-y-3">

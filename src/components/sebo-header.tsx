@@ -71,7 +71,7 @@ export function SeboHeader({ nome, convite = "" }: { nome: string; convite?: str
       </p>
       {email ? (
         <p className="mt-1 truncate text-xs font-medium tracking-wide text-ink/55">
-          {label} | Operador: {email}
+          Operador: {email}
         </p>
       ) : null}
       {code ? (
