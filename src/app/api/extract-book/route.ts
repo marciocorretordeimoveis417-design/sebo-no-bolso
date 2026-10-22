@@ -60,14 +60,10 @@ function cleanYear(value: string): string {
   return value.match(/\b(?:1[5-9]\d{2}|20\d{2})\b/)?.[0] ?? "";
 }
 
-const MODELS = [
-  "gemini-3.5-flash-lite",
-  "gemini-3.1-flash-lite",
-  "gemini-flash-lite-latest",
-  "gemini-3.5-flash",
-  "gemini-3.8-flash",
-  "gemini-flash-latest",
-] as const;
+const MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-lite-latest"] as const;
+const MODEL_TIMEOUT_MS = 18_000;
+
+export const maxDuration = 60;
 
 function errorCode(error: unknown): number | undefined {
   if (typeof error === "object" && error !== null && "status" in error) {
@@ -97,8 +93,25 @@ function isMissingModel(error: unknown): boolean {
   return error instanceof Error && /no longer available|NOT_FOUND|is not found|not supported/i.test(error.message);
 }
 
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const timeout = new Error("timeout");
+      Object.assign(timeout, { status: 503 });
+      reject(timeout);
+    }, ms);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function failureMessage(error: unknown): string {
@@ -125,26 +138,26 @@ export async function POST(request: Request) {
     );
   }
 
-  const formData = await request.formData();
-  const cover = formData.get("cover");
-  const dataPage = formData.get("dataPage");
-
-  if (!isImageFile(cover) || !isImageFile(dataPage)) {
-    return NextResponse.json(
-      { error: "Envie a foto da capa e a página de créditos." },
-      { status: 400 },
-    );
-  }
-
-  const maxBytes = 12 * 1024 * 1024;
-  if (cover.size > maxBytes || dataPage.size > maxBytes) {
-    return NextResponse.json(
-      { error: "Cada foto precisa ter no máximo 12 MB." },
-      { status: 400 },
-    );
-  }
-
   try {
+    const formData = await request.formData();
+    const cover = formData.get("cover");
+    const dataPage = formData.get("dataPage");
+
+    if (!isImageFile(cover) || !isImageFile(dataPage)) {
+      return NextResponse.json(
+        { error: "Envie a foto da capa e a página de créditos." },
+        { status: 400 },
+      );
+    }
+
+    const maxBytes = 12 * 1024 * 1024;
+    if (cover.size > maxBytes || dataPage.size > maxBytes) {
+      return NextResponse.json(
+        { error: "Cada foto precisa ter no máximo 12 MB." },
+        { status: 400 },
+      );
+    }
+
     const [coverImage, pageImage] = await Promise.all([
       fileToInlineData(cover),
       fileToInlineData(dataPage),
@@ -153,10 +166,10 @@ export async function POST(request: Request) {
     let response: Awaited<ReturnType<typeof ai.models.generateContent>> | undefined;
     let lastError: unknown;
 
-    for (let round = 0; round < 2 && !response; round += 1) {
-      for (const model of MODELS) {
-        try {
-          response = await ai.models.generateContent({
+    for (const model of MODELS) {
+      try {
+        response = await withTimeout(
+          ai.models.generateContent({
             model,
             contents: [
               { text: PROMPT },
@@ -178,19 +191,16 @@ export async function POST(request: Request) {
                 required: ["title", "author", "publisher", "isbn", "year"],
               },
             },
-          });
-          lastError = undefined;
-          break;
-        } catch (error) {
-          lastError = error;
-          const code = errorCode(error);
-          console.error("extract-book model", model, code ?? "unknown");
-          if (!isOverloaded(error) && !isMissingModel(error)) throw error;
-        }
-      }
-
-      if (!response && lastError && isOverloaded(lastError)) {
-        await wait(1500);
+          }),
+          MODEL_TIMEOUT_MS,
+        );
+        lastError = undefined;
+        break;
+      } catch (error) {
+        lastError = error;
+        const code = errorCode(error);
+        console.error("extract-book model", model, code ?? "unknown");
+        if (!isOverloaded(error) && !isMissingModel(error)) throw error;
       }
     }
 

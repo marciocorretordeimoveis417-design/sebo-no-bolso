@@ -1,9 +1,11 @@
 "use client";
 
-import { coverKey, readCovers } from "@/lib/cover-cache";
+import { SeboHeader, useSeboAtivo } from "@/components/sebo-header";
+import { removeBookCover, signedCoverUrls } from "@/lib/book-covers";
+import { getSeboAtivo } from "@/lib/sebo-ativo";
 import { getSignedInUser, getSupabase } from "@/lib/supabase";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 type Livro = {
   id: string;
@@ -18,6 +20,7 @@ type Livro = {
   precoSugerido: number;
   precoVenda: number;
   status: string;
+  capaPath: string;
 };
 
 const fieldClassName =
@@ -59,6 +62,7 @@ function readLivro(row: Record<string, unknown>): Livro | null {
     precoSugerido: asMoney(row.preco_sugerido),
     precoVenda: asMoney(row.preco_venda),
     status: asText(row.status),
+    capaPath: asText(row.capa_path),
   };
 }
 
@@ -263,6 +267,7 @@ function TrashIcon() {
 function BookDialog({
   book,
   coverSrc,
+  seboId,
   usuarioId,
   onClose,
   onSaved,
@@ -270,6 +275,7 @@ function BookDialog({
 }: {
   book: Livro;
   coverSrc?: string;
+  seboId: string;
   usuarioId: string;
   onClose: () => void;
   onSaved: (book: Livro) => void;
@@ -278,6 +284,7 @@ function BookDialog({
   const [editing, setEditing] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [selling, setSelling] = useState(false);
   const [draft, setDraft] = useState<BookDraft>(() => draftFrom(book));
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -287,7 +294,7 @@ function BookDialog({
     document.body.style.overflow = "hidden";
 
     function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape" && !saving && !deleting) {
+      if (event.key === "Escape" && !saving && !deleting && !selling) {
         onClose();
       }
     }
@@ -297,10 +304,57 @@ function BookDialog({
       document.body.style.overflow = previous;
       window.removeEventListener("keydown", onKey);
     };
-  }, [deleting, onClose, saving]);
+  }, [deleting, onClose, saving, selling]);
 
   function updateDraft(field: keyof BookDraft, value: string) {
     setDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  async function updateLivro(values: Record<string, unknown>) {
+    const supabase = getSupabase();
+    if (seboId) {
+      const scoped = await supabase.from("livros").update(values).eq("id", book.id).eq("sebo_id", seboId);
+      if (!(scoped.error && /sebo_id/i.test(scoped.error.message))) {
+        return scoped;
+      }
+    }
+
+    return supabase.from("livros").update(values).eq("id", book.id).eq("usuario_id", usuarioId);
+  }
+
+  async function deleteLivro() {
+    const supabase = getSupabase();
+    if (seboId) {
+      const scoped = await supabase.from("livros").delete().eq("id", book.id).eq("sebo_id", seboId);
+      if (!(scoped.error && /sebo_id/i.test(scoped.error.message))) {
+        return scoped;
+      }
+    }
+
+    return supabase.from("livros").delete().eq("id", book.id).eq("usuario_id", usuarioId);
+  }
+
+  async function markSold() {
+    if (book.status.trim().toLocaleLowerCase("pt-BR") === "vendido") {
+      return;
+    }
+
+    setSelling(true);
+    setFormError(null);
+
+    const { error } = await updateLivro({ status: "vendido" });
+    setSelling(false);
+
+    if (error) {
+      setFormError(
+        error.code === "42501"
+          ? "Sua conta não tem permissão para alterar este livro."
+          : `Não foi possível marcar como vendido. ${error.message}`,
+      );
+      return;
+    }
+
+    onSaved({ ...book, status: "vendido" });
   }
 
   async function saveChanges() {
@@ -351,25 +405,22 @@ function BookDialog({
       precoSugerido: suggested,
       precoVenda: sale,
       status: draft.status.trim() || "catalogado",
+      capaPath: book.capaPath,
     };
 
-    const { error } = await getSupabase()
-      .from("livros")
-      .update({
-        titulo: saved.titulo,
-        autor: saved.autor,
-        editora: saved.editora,
-        isbn: saved.isbn,
-        ano_publicacao: Number(saved.ano),
-        estado_conservacao: saved.estado,
-        descricao_estado: saved.descricao || null,
-        preco_custo: saved.precoCusto,
-        preco_sugerido: saved.precoSugerido,
-        preco_venda: saved.precoVenda,
-        status: saved.status,
-      })
-      .eq("id", book.id)
-      .eq("usuario_id", usuarioId);
+    const { error } = await updateLivro({
+      titulo: saved.titulo,
+      autor: saved.autor,
+      editora: saved.editora,
+      isbn: saved.isbn,
+      ano_publicacao: Number(saved.ano),
+      estado_conservacao: saved.estado,
+      descricao_estado: saved.descricao || null,
+      preco_custo: saved.precoCusto,
+      preco_sugerido: saved.precoSugerido,
+      preco_venda: saved.precoVenda,
+      status: saved.status,
+    });
 
     setSaving(false);
 
@@ -394,9 +445,13 @@ function BookDialog({
     setDeleting(true);
     setFormError(null);
 
-    const { error } = await getSupabase().from("livros").delete().eq("id", book.id).eq("usuario_id", usuarioId);
+    const { error } = await deleteLivro();
 
     setDeleting(false);
+
+    if (!error) {
+      void removeBookCover(getSupabase(), book.capaPath);
+    }
 
     if (error) {
       setConfirmingDelete(false);
@@ -568,29 +623,43 @@ function BookDialog({
               </button>
             </>
           ) : (
-            <>
-              <button
-                type="button"
-                onClick={() => {
-                  setDraft(draftFrom(book));
-                  setEditing(true);
-                }}
-                className="inline-flex h-11 flex-1 items-center justify-center rounded-md bg-ink text-sm font-semibold text-card"
-              >
-                Editar
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setFormError(null);
-                  setConfirmingDelete(true);
-                }}
-                className="inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-md bg-[#9f2d2d] text-sm font-semibold text-white"
-              >
-                <TrashIcon />
-                Excluir Livro
-              </button>
-            </>
+            <div className="flex w-full flex-col gap-2">
+              {book.status.trim().toLocaleLowerCase("pt-BR") !== "vendido" ? (
+                <button
+                  type="button"
+                  onClick={() => void markSold()}
+                  disabled={selling}
+                  className="inline-flex h-11 w-full items-center justify-center rounded-md bg-[#18794a] text-sm font-semibold text-white disabled:opacity-60"
+                >
+                  {selling ? "Marcando…" : "Marcar como Vendido"}
+                </button>
+              ) : null}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraft(draftFrom(book));
+                    setEditing(true);
+                  }}
+                  disabled={selling}
+                  className="inline-flex h-11 flex-1 items-center justify-center rounded-md bg-ink text-sm font-semibold text-card disabled:opacity-60"
+                >
+                  Editar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFormError(null);
+                    setConfirmingDelete(true);
+                  }}
+                  disabled={selling}
+                  className="inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-md bg-[#9f2d2d] text-sm font-semibold text-white disabled:opacity-60"
+                >
+                  <TrashIcon />
+                  Excluir Livro
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </div>
@@ -598,15 +667,37 @@ function BookDialog({
   );
 }
 
+function bookStatus(book: Livro): string {
+  return book.status.trim().toLocaleLowerCase("pt-BR") || "catalogado";
+}
+
+function matchesSearch(book: Livro, term: string): boolean {
+  const needle = term.trim().toLocaleLowerCase("pt-BR");
+  if (!needle) {
+    return true;
+  }
+
+  const haystack = [book.titulo, book.autor, book.editora, book.isbn].join("\n").toLocaleLowerCase("pt-BR");
+  if (haystack.includes(needle)) {
+    return true;
+  }
+
+  const digits = needle.replace(/\D/g, "");
+  return digits.length > 0 && book.isbn.replace(/\D/g, "").includes(digits);
+}
+
 export default function DashboardPage() {
   const router = useRouter();
-  const coverUrls = useRef<string[]>([]);
+  const seboAtivo = useSeboAtivo();
   const [books, setBooks] = useState<Livro[]>([]);
   const [covers, setCovers] = useState<Record<string, string>>({});
+  const [seboId, setSeboId] = useState("");
   const [usuarioId, setUsuarioId] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [busca, setBusca] = useState("");
+  const [aba, setAba] = useState<"catalogado" | "vendido">("catalogado");
 
   useEffect(() => {
     function closeDetail() {
@@ -616,7 +707,6 @@ export default function DashboardPage() {
     window.addEventListener("sebo-nav", closeDetail);
     return () => {
       window.removeEventListener("sebo-nav", closeDetail);
-      for (const url of coverUrls.current) URL.revokeObjectURL(url);
     };
   }, []);
 
@@ -637,46 +727,57 @@ export default function DashboardPage() {
 
       setUsuarioId(user.id);
       const supabase = getSupabase();
+      const sebo = seboAtivo ?? (await getSeboAtivo(supabase));
+      if (!active) {
+        return;
+      }
 
-      const { data, error: readError } = await supabase
-        .from("livros")
-        .select(
-          "id, titulo, autor, editora, isbn, ano_publicacao, estado_conservacao, descricao_estado, preco_custo, preco_sugerido, preco_venda, status",
-        )
-        .eq("usuario_id", user.id)
-        .order("criado_em", { ascending: false });
+      setSeboId(sebo?.id ?? "");
+
+      const listed =
+        "id, titulo, autor, editora, isbn, ano_publicacao, estado_conservacao, descricao_estado, preco_custo, preco_sugerido, preco_venda, status, capa_path";
+      let result = sebo
+        ? await supabase.from("livros").select(listed).eq("sebo_id", sebo.id).order("criado_em", { ascending: false })
+        : await supabase.from("livros").select(listed).eq("usuario_id", user.id).order("criado_em", { ascending: false });
+
+      if (result.error && sebo && /sebo_id/i.test(result.error.message)) {
+        result = await supabase.from("livros").select(listed).eq("usuario_id", user.id).order("criado_em", { ascending: false });
+      }
 
       if (!active) {
         return;
       }
 
-      if (readError) {
-        setError(readError.message);
+      if (result.error) {
+        setError(result.error.message);
         setBooks([]);
         setReady(true);
         return;
       }
 
-      const nextBooks = (data ?? []).flatMap((row) => {
+      const nextBooks = (result.data ?? []).flatMap((row) => {
         const book = readLivro(row as Record<string, unknown>);
         return book ? [book] : [];
       });
 
-      let coverMap = new Map<string, string>();
-      try {
-        coverMap = await readCovers(nextBooks.map((book) => book.isbn));
-      } catch {
-        coverMap = new Map();
-      }
+      const stored = await signedCoverUrls(
+        supabase,
+        nextBooks.map((book) => book.capaPath),
+      );
 
       if (!active) {
-        for (const url of coverMap.values()) URL.revokeObjectURL(url);
         return;
       }
 
-      for (const url of coverUrls.current) URL.revokeObjectURL(url);
-      coverUrls.current = [...coverMap.values()];
-      setCovers(Object.fromEntries(coverMap));
+      const nextCovers: Record<string, string> = {};
+      for (const book of nextBooks) {
+        const remote = book.capaPath ? stored[book.capaPath] : "";
+        if (remote) {
+          nextCovers[book.id] = remote;
+        }
+      }
+
+      setCovers(nextCovers);
       setBooks(nextBooks);
       setReady(true);
     }
@@ -686,33 +787,71 @@ export default function DashboardPage() {
     return () => {
       active = false;
     };
-  }, [router]);
+  }, [router, seboAtivo]);
 
   const selected = books.find((book) => book.id === selectedId) ?? null;
-  const totalLabel = books.length === 1 ? "Total: 1 livro" : `Total: ${books.length} livros`;
+  const daAba = books.filter((book) => bookStatus(book) === aba);
+  const visiveis = daAba.filter((book) => matchesSearch(book, busca));
+  const totalLabel = visiveis.length === 1 ? "Total: 1 livro" : `Total: ${visiveis.length} livros`;
 
   if (!ready) {
     return (
-      <div className="ledger flex flex-1 items-center justify-center px-5">
-        <p className="text-sm text-ink/60">Abrindo o acervo…</p>
+      <div className="ledger flex flex-1 flex-col">
+        <SeboHeader nome={seboAtivo?.nome ?? ""} />
+        <div className="flex flex-1 items-center justify-center px-5">
+          <p className="text-sm text-ink/60">Abrindo o acervo…</p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="ledger flex flex-1 flex-col">
+      <SeboHeader nome={seboAtivo?.nome ?? ""} />
       <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 py-6 md:px-8 md:py-12">
         <h1 className="font-serif text-4xl leading-none tracking-tight text-ink md:text-6xl">Acervo</h1>
         <p className="mt-3 max-w-md text-sm leading-6 text-ink/70">
-          Os livros catalogados nesta conta, do mais recente ao mais antigo.
+          Os livros deste sebo, do mais recente ao mais antigo.
         </p>
+
+        <label className="mt-6 block">
+          <span className="sr-only">Buscar no acervo</span>
+          <input
+            value={busca}
+            onChange={(event) => setBusca(event.target.value)}
+            placeholder="Buscar por título, autor, editora ou ISBN"
+            className="h-12 w-full rounded-full border border-rule bg-card px-5 text-base text-ink outline-none placeholder:text-ink/40 focus:border-ink"
+          />
+        </label>
+
+        <div className="mt-4 grid grid-cols-2 rounded-full border border-rule bg-card p-1" role="tablist" aria-label="Situação do estoque">
+          {(
+            [
+              ["catalogado", "Catalogados"],
+              ["vendido", "Vendidos"],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={aba === id}
+              onClick={() => setAba(id)}
+              className={`h-10 rounded-full text-sm font-semibold ${
+                aba === id ? "bg-[#18794a] text-white" : "text-ink/60"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
 
         <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm font-medium text-ink">{totalLabel}</p>
           <button
             type="button"
-            onClick={() => downloadCsv(books)}
-            disabled={books.length === 0}
+            onClick={() => downloadCsv(daAba)}
+            disabled={daAba.length === 0}
             className="inline-flex h-11 items-center justify-center rounded-md border border-ink px-4 text-sm font-medium text-ink disabled:opacity-50"
           >
             Exportar Acervo (CSV)
@@ -725,20 +864,24 @@ export default function DashboardPage() {
           </p>
         ) : null}
 
-        {books.length === 0 ? (
+        {visiveis.length === 0 ? (
           <p className="mt-8 rounded-2xl border border-rule bg-card px-4 py-6 text-sm leading-6 text-ink/70">
-            Nenhum livro catalogado ainda. Use Novo livro para incluir o primeiro.
+            {busca.trim()
+              ? "Nenhum livro encontrado para essa busca."
+              : aba === "vendido"
+                ? "Nenhum livro vendido ainda."
+                : "Nenhum livro catalogado ainda. Use Novo livro para incluir o primeiro."}
           </p>
         ) : (
           <ul className="mt-4 space-y-3">
-            {books.map((book) => (
+            {visiveis.map((book) => (
               <li key={book.id}>
                 <button
                   type="button"
                   onClick={() => setSelectedId(book.id)}
                   className="flex w-full items-center gap-3 rounded-2xl border border-rule bg-card px-3 py-3 text-left"
                 >
-                  <CoverThumb src={covers[coverKey(book.isbn ?? "")]} title={book.titulo || "livro"} />
+                  <CoverThumb src={covers[book.id]} title={book.titulo || "livro"} />
                   <span className="min-w-0 flex-1">
                     <span className="flex items-start justify-between gap-3">
                       <span className="min-w-0">
@@ -765,11 +908,14 @@ export default function DashboardPage() {
       {selected ? (
         <BookDialog
           book={selected}
-          coverSrc={covers[coverKey(selected.isbn)]}
+          coverSrc={covers[selected.id]}
+          seboId={seboId}
           usuarioId={usuarioId}
           onClose={() => setSelectedId(null)}
           onSaved={(saved) => {
-            setBooks((current) => current.map((item) => (item.id === saved.id ? saved : item)));
+            setBooks((current) =>
+              current.map((item) => (item.id === saved.id ? { ...saved, capaPath: item.capaPath } : item)),
+            );
             setSelectedId(null);
           }}
           onDeleted={(bookId) => {

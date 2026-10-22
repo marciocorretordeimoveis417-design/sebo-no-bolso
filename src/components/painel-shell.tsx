@@ -1,6 +1,7 @@
 "use client";
 
 import { BrandMark } from "@/components/brand-mark";
+import { clearSeboAtivo, getSeboAtivo } from "@/lib/sebo-ativo";
 import { getSignedInUser, getSupabase } from "@/lib/supabase";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -67,13 +68,12 @@ export function PainelShell({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const { data } = await getSupabase().from("perfis").select("nome_sebo").eq("id", user.id).maybeSingle();
+      const sebo = await getSeboAtivo(getSupabase());
       if (!active) {
         return;
       }
 
-      const nomeSebo = typeof data?.nome_sebo === "string" ? data.nome_sebo.trim() : "";
-      setNome(nomeSebo || "Sebo");
+      setNome(sebo?.nome?.trim() || "Sebo");
       setReady(true);
     })().catch(() => {
       if (active) {
@@ -94,6 +94,7 @@ export function PainelShell({ children }: { children: React.ReactNode }) {
     closeDetail();
     setLeaving(true);
     try {
+      clearSeboAtivo();
       await getSupabase().auth.signOut();
     } finally {
       router.replace("/login");

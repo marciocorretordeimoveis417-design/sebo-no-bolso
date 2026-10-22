@@ -1,6 +1,9 @@
 "use client";
 
-import { rememberCover } from "@/lib/cover-cache";
+import { SeboHeader, useSeboAtivo } from "@/components/sebo-header";
+import { storeBookCover } from "@/lib/book-covers";
+import { prepareImage } from "@/lib/prepare-image";
+import { getSeboAtivo } from "@/lib/sebo-ativo";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabase";
 import { useEffect, useRef, useState } from "react";
 
@@ -75,6 +78,19 @@ function parseMoney(value: string): number | null {
   return amount;
 }
 
+async function compactPhoto(file: Blob): Promise<Blob> {
+  let image = await prepareImage(file, 1600, 0.8);
+  if (image.size > 1_600_000) {
+    image = await prepareImage(image, 1200, 0.65);
+  }
+
+  if (image.size > 2_000_000) {
+    throw new Error("A foto ficou grande demais para enviar. Tente outra imagem.");
+  }
+
+  return image;
+}
+
 function fieldText(value: string | number | undefined): string {
   if (typeof value === "number" && Number.isFinite(value)) {
     return String(value);
@@ -84,6 +100,7 @@ function fieldText(value: string | number | undefined): string {
 }
 
 export default function CadastrarLivroPage() {
+  const seboAtivo = useSeboAtivo();
   const requestId = useRef(0);
   const filesRef = useRef<{ cover: File | null; dataPage: File | null }>({
     cover: null,
@@ -123,17 +140,34 @@ export default function CadastrarLivroPage() {
     }
 
     const currentRequest = ++requestId.current;
-    const body = new FormData();
-    body.append("cover", cover);
-    body.append("dataPage", dataPage);
-
     setExtracting(true);
     setError(null);
     setNotice(null);
 
     try {
-      const response = await fetch("/api/extract-book", { method: "POST", body });
-      const payload = (await response.json()) as ExtractedBook;
+      const [coverImage, pageImage] = await Promise.all([compactPhoto(cover), compactPhoto(dataPage)]);
+
+      async function postPhotos() {
+        const body = new FormData();
+        body.append("cover", new File([coverImage], "capa.jpg", { type: "image/jpeg" }));
+        body.append("dataPage", new File([pageImage], "creditos.jpg", { type: "image/jpeg" }));
+        return fetch("/api/extract-book", { method: "POST", body });
+      }
+
+      let response: Response;
+      try {
+        response = await postPhotos();
+      } catch {
+        response = await postPhotos();
+      }
+
+      const raw = await response.text();
+      let payload: ExtractedBook;
+      try {
+        payload = JSON.parse(raw) as ExtractedBook;
+      } catch {
+        throw new Error("A leitura foi interrompida. As fotos continuam nos cards; tente de novo.");
+      }
 
       if (currentRequest !== requestId.current) {
         return;
@@ -162,9 +196,14 @@ export default function CadastrarLivroPage() {
       }
 
       setNotice("Ficha preenchida a partir das fotos. Confira antes de salvar.");
-    } catch {
+    } catch (error) {
       if (currentRequest === requestId.current) {
-        setError("Não foi possível falar com o servidor.");
+        const message = error instanceof Error ? error.message : "";
+        setError(
+          message && !/failed to fetch|networkerror|load failed|falar com o servidor/i.test(message)
+            ? message
+            : "Não foi possível falar com o servidor. As fotos continuam nos cards; tente de novo.",
+        );
       }
     } finally {
       if (currentRequest === requestId.current) {
@@ -304,34 +343,77 @@ export default function CadastrarLivroPage() {
         return;
       }
 
-      const { error: insertError } = await supabase.from("livros").insert([
-        {
-          usuario_id: authData.user.id,
-          titulo: title,
-          autor: author,
-          editora: publisher,
-          isbn: isbnValue,
-          ano_publicacao: Number(year),
-          estado_conservacao: conservation,
-          descricao_estado: notes || null,
-          preco_custo: cost,
-          preco_sugerido: suggested,
-          preco_venda: sale,
-        },
-      ]);
+      const sebo = seboAtivo ?? (await getSeboAtivo(supabase));
+      if (!sebo) {
+        setError("Sua conta não está ligada a um sebo.");
+        return;
+      }
 
-      if (insertError) {
+      const livro = {
+        usuario_id: authData.user.id,
+        titulo: title,
+        autor: author,
+        editora: publisher,
+        isbn: isbnValue,
+        ano_publicacao: Number(year),
+        estado_conservacao: conservation,
+        descricao_estado: notes || null,
+        preco_custo: cost,
+        preco_sugerido: suggested,
+        preco_venda: sale,
+      };
+
+      let { data: inserted, error: insertError } = await supabase
+        .from("livros")
+        .insert([{ ...livro, sebo_id: sebo.id }])
+        .select("id")
+        .single();
+
+      if (insertError && /sebo_id/i.test(insertError.message)) {
+        ({ data: inserted, error: insertError } = await supabase.from("livros").insert([livro]).select("id").single());
+      }
+
+      if (insertError || !inserted?.id) {
         setError(
-          insertError.code === "42501"
+          insertError?.code === "42501"
             ? "Sua conta não tem permissão para salvar este livro."
-            : `Não foi possível salvar o livro. ${insertError.message}`,
+            : `Não foi possível salvar o livro. ${insertError?.message ?? "Sem identificador."}`,
         );
         return;
       }
 
       const cover = filesRef.current.cover;
+      let coverWarning = "";
       if (cover) {
-        void rememberCover(isbnValue, cover).catch(() => undefined);
+        try {
+          const path = await storeBookCover(supabase, sebo.id, inserted.id, cover);
+          let { error: pathError } = await supabase
+            .from("livros")
+            .update({ capa_path: path })
+            .eq("id", inserted.id)
+            .eq("sebo_id", sebo.id);
+          if (pathError && /sebo_id/i.test(pathError.message)) {
+            ({ error: pathError } = await supabase
+              .from("livros")
+              .update({ capa_path: path })
+              .eq("id", inserted.id)
+              .eq("usuario_id", authData.user.id));
+          }
+          if (pathError) {
+            throw pathError;
+          }
+        } catch (coverError) {
+          const detail =
+            coverError instanceof Error
+              ? coverError.message
+              : typeof coverError === "object" &&
+                  coverError !== null &&
+                  "message" in coverError &&
+                  typeof coverError.message === "string"
+                ? coverError.message
+                : "falha ao guardar a imagem";
+          coverWarning = ` O livro entrou no acervo, mas a capa não ficou guardada. ${detail}`;
+        }
       }
 
       setIsbn("");
@@ -345,7 +427,7 @@ export default function CadastrarLivroPage() {
       setDescricao("");
       setCondition(null);
       clearPhotos();
-      setNotice("Livro salvo.");
+      setNotice(`Livro salvo.${coverWarning}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Não foi possível salvar o livro.");
     } finally {
@@ -355,6 +437,7 @@ export default function CadastrarLivroPage() {
 
   return (
     <div className="ledger flex flex-1 flex-col">
+      <SeboHeader nome={seboAtivo?.nome ?? ""} />
       <div className="mx-auto flex w-full max-w-xl flex-1 flex-col px-4 py-6 md:px-6 md:py-12">
         <h1 className="font-serif text-4xl leading-none tracking-tight text-ink md:text-5xl">
           Cadastrar livro
