@@ -2,7 +2,7 @@
 
 import { SeboHeader, useSeboAtivo } from "@/components/sebo-header";
 import { storeBookCover } from "@/lib/book-covers";
-import { prepareImage } from "@/lib/prepare-image";
+import { compressCameraPhoto } from "@/lib/prepare-image";
 import { getSeboAtivo } from "@/lib/sebo-ativo";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabase";
 import { useEffect, useRef, useState } from "react";
@@ -78,19 +78,6 @@ function parseMoney(value: string): number | null {
   return amount;
 }
 
-async function compactPhoto(file: Blob): Promise<Blob> {
-  let image = await prepareImage(file, 1600, 0.8);
-  if (image.size > 1_600_000) {
-    image = await prepareImage(image, 1200, 0.65);
-  }
-
-  if (image.size > 2_000_000) {
-    throw new Error("A foto ficou grande demais para enviar. Tente outra imagem.");
-  }
-
-  return image;
-}
-
 function fieldText(value: string | number | undefined): string {
   if (typeof value === "number" && Number.isFinite(value)) {
     return String(value);
@@ -106,6 +93,7 @@ export default function CadastrarLivroPage() {
     cover: null,
     dataPage: null,
   });
+  const photoToken = useRef({ capa: 0, creditos: 0 });
   const coverPreviewRef = useRef<string | null>(null);
   const dataPagePreviewRef = useRef<string | null>(null);
   const [coverPreview, setCoverPreview] = useState<string | null>(null);
@@ -145,7 +133,10 @@ export default function CadastrarLivroPage() {
     setNotice(null);
 
     try {
-      const [coverImage, pageImage] = await Promise.all([compactPhoto(cover), compactPhoto(dataPage)]);
+      const [coverImage, pageImage] = await Promise.all([
+        compressCameraPhoto(cover),
+        compressCameraPhoto(dataPage),
+      ]);
 
       async function postPhotos() {
         const body = new FormData();
@@ -212,7 +203,7 @@ export default function CadastrarLivroPage() {
     }
   }
 
-  function onSelectPhoto(kind: PhotoKind, list: FileList | null) {
+  async function onSelectPhoto(kind: PhotoKind, list: FileList | null) {
     const file = list?.[0];
     if (!file || file.size === 0) {
       setNotice(null);
@@ -226,21 +217,40 @@ export default function CadastrarLivroPage() {
       return;
     }
 
-    const previewUrl = URL.createObjectURL(file);
+    const token = ++photoToken.current[kind];
+    setError(null);
+    setNotice("Preparando a foto…");
+
+    let ready: File;
+    try {
+      const compact = await compressCameraPhoto(file);
+      ready = new File([compact], kind === "capa" ? "capa.jpg" : "creditos.jpg", { type: "image/jpeg" });
+    } catch (caught) {
+      if (photoToken.current[kind] !== token) {
+        return;
+      }
+      setNotice(null);
+      setError(caught instanceof Error ? caught.message : "Não foi possível reduzir a foto.");
+      return;
+    }
+
+    if (photoToken.current[kind] !== token) {
+      return;
+    }
+
+    const previewUrl = URL.createObjectURL(ready);
 
     if (kind === "capa") {
       if (coverPreviewRef.current) URL.revokeObjectURL(coverPreviewRef.current);
       coverPreviewRef.current = previewUrl;
-      filesRef.current.cover = file;
+      filesRef.current.cover = ready;
       setCoverPreview(previewUrl);
     } else {
       if (dataPagePreviewRef.current) URL.revokeObjectURL(dataPagePreviewRef.current);
       dataPagePreviewRef.current = previewUrl;
-      filesRef.current.dataPage = file;
+      filesRef.current.dataPage = ready;
       setDataPagePreview(previewUrl);
     }
-
-    setError(null);
 
     const { cover, dataPage } = filesRef.current;
     if (cover && dataPage) {

@@ -1,6 +1,7 @@
 "use client";
 
 import { BrandMark } from "@/components/brand-mark";
+import { clearOperatorEmail } from "@/components/sebo-header";
 import { clearSeboAtivo, getSeboAtivo } from "@/lib/sebo-ativo";
 import { getSignedInUser, getSupabase } from "@/lib/supabase";
 import Link from "next/link";
@@ -95,6 +96,7 @@ export function PainelShell({ children }: { children: React.ReactNode }) {
     setLeaving(true);
     try {
       clearSeboAtivo();
+      clearOperatorEmail();
       await getSupabase().auth.signOut();
     } finally {
       router.replace("/login");
