@@ -17,7 +17,14 @@ type ExtractedBook = {
   publisher?: string;
   isbn?: string;
   year?: string | number;
+  preco_minimo_sugerido?: number;
+  preco_maximo_sugerido?: number;
   error?: string;
+};
+
+type FaixaPreco = {
+  minimo: number;
+  maximo: number;
 };
 
 const CONDITIONS: { id: Condition; label: string }[] = [
@@ -86,6 +93,35 @@ function fieldText(value: string | number | undefined): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function readSuggestedPrice(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 999_999.99) {
+    return null;
+  }
+
+  return Math.round(value * 100) / 100;
+}
+
+function readFaixaPreco(minValue: unknown, maxValue: unknown): FaixaPreco | null {
+  const minimo = readSuggestedPrice(minValue);
+  const maximo = readSuggestedPrice(maxValue);
+  if (minimo === null || maximo === null || Math.max(minimo, maximo) <= 0) {
+    return null;
+  }
+
+  return {
+    minimo: Math.min(minimo, maximo),
+    maximo: Math.max(minimo, maximo),
+  };
+}
+
+function formatSuggestedPrice(value: number): string {
+  return value.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function moneyInput(value: number): string {
+  return value.toFixed(2).replace(".", ",");
+}
+
 export default function CadastrarLivroPage() {
   const seboAtivo = useSeboAtivo();
   const requestId = useRef(0);
@@ -106,6 +142,7 @@ export default function CadastrarLivroPage() {
   const [precoCusto, setPrecoCusto] = useState("");
   const [precoSugerido, setPrecoSugerido] = useState("");
   const [precoVenda, setPrecoVenda] = useState("");
+  const [faixaPreco, setFaixaPreco] = useState<FaixaPreco | null>(null);
   const [descricao, setDescricao] = useState("");
   const [condition, setCondition] = useState<Condition | null>(null);
   const [extracting, setExtracting] = useState(false);
@@ -131,6 +168,7 @@ export default function CadastrarLivroPage() {
     setExtracting(true);
     setError(null);
     setNotice(null);
+    setFaixaPreco(null);
 
     try {
       const [coverImage, pageImage] = await Promise.all([
@@ -180,6 +218,13 @@ export default function CadastrarLivroPage() {
       setEditora(publisher);
       setIsbn(isbnValue);
       setAno(year);
+
+      const faixa = readFaixaPreco(payload.preco_minimo_sugerido, payload.preco_maximo_sugerido);
+      setFaixaPreco(faixa);
+      if (faixa) {
+        const media = Math.round(((faixa.minimo + faixa.maximo) / 2) * 100) / 100;
+        setPrecoVenda(moneyInput(media));
+      }
 
       if (!title && !author && !publisher && !isbnValue && !year) {
         setError("As fotos chegaram, mas a leitura não encontrou os dados. Tente de novo com mais luz.");
@@ -434,6 +479,7 @@ export default function CadastrarLivroPage() {
       setPrecoCusto("");
       setPrecoSugerido("");
       setPrecoVenda("");
+      setFaixaPreco(null);
       setDescricao("");
       setCondition(null);
       clearPhotos();
@@ -631,6 +677,16 @@ export default function CadastrarLivroPage() {
                 />
               </label>
             </div>
+
+            {faixaPreco ? (
+              <aside className="rounded-md border border-[#b7d7b4] bg-[#e7f5e4] px-4 py-3">
+                <p className="text-sm font-semibold text-ink">💡 Sugestão de Preço Inteligente</p>
+                <p className="mt-1 text-sm leading-6 text-ink">
+                  Preço Sugerido de Mercado: R$ {formatSuggestedPrice(faixaPreco.minimo)} até R${" "}
+                  {formatSuggestedPrice(faixaPreco.maximo)}
+                </p>
+              </aside>
+            ) : null}
           </div>
 
           <fieldset className="mt-6">

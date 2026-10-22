@@ -2,7 +2,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { NextResponse } from "next/server";
 
 const PROMPT =
-  "Analise a imagem 1 (capa do livro) para extrair o Título, Autor e Editora. Faça o OCR detalhado da imagem 2 (página de créditos/ficha catalográfica interna do livro) para extrair estritamente o ISBN e o Ano de Publicação correto, ignorando outras datas secundárias da página. Retorne a resposta obrigatoriamente e estritamente como um objeto JSON válido, sem blocos de código Markdown de texto (sem ```json), contendo as chaves exatas: title, author, publisher, isbn, year.";
+  "Analise a imagem 1 (capa do livro) para extrair o Título, Autor e Editora. Faça o OCR detalhado da imagem 2 (página de créditos/ficha catalográfica interna do livro) para extrair estritamente o ISBN e o Ano de Publicação correto, ignorando outras datas secundárias da página. Além de extrair os dados textuais das imagens, utilize o seu conhecimento de mercado para estimar o valor médio de venda atual deste livro usado no mercado brasileiro (baseando-se em referências como Estante Virtual, Amazon Brasil e Mercado Livre). Calcule um preço mínimo sugerido e um preço máximo sugerido para o estado do livro analisado. O JSON de retorno da API deve ser estendido e conter obrigatoriamente as chaves exatas: title, author, publisher, isbn, year, preco_minimo_sugerido, preco_maximo_sugerido. preco_minimo_sugerido e preco_maximo_sugerido devem ser números decimais puros em reais, sem símbolo de moeda, sem texto e sem separador de milhar. O mínimo não pode ser maior que o máximo.";
 
 type BookFields = {
   title: string;
@@ -10,6 +10,8 @@ type BookFields = {
   publisher: string;
   isbn: string;
   year: string;
+  preco_minimo_sugerido: number;
+  preco_maximo_sugerido: number;
 };
 
 function isImageFile(value: FormDataEntryValue | null): value is File {
@@ -60,8 +62,43 @@ function cleanYear(value: string): string {
   return value.match(/\b(?:1[5-9]\d{2}|20\d{2})\b/)?.[0] ?? "";
 }
 
-const MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-lite-latest"] as const;
-const MODEL_TIMEOUT_MS = 18_000;
+function asPrice(value: unknown): number | null {
+  let amount: number | null = null;
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    amount = value;
+  } else if (typeof value === "string") {
+    const cleaned = value.trim().replace(/r\$/gi, "").replace(/\s/g, "");
+    const normalized = cleaned.includes(",")
+      ? cleaned.replace(/\./g, "").replace(",", ".")
+      : cleaned;
+    const parsed = Number(normalized);
+    amount = Number.isFinite(parsed) ? parsed : null;
+  }
+
+  if (amount === null || !Number.isFinite(amount) || amount < 0 || amount > 999_999.99) {
+    return null;
+  }
+
+  return Math.round(amount * 100) / 100;
+}
+
+function priceRange(minValue: unknown, maxValue: unknown): { min: number; max: number } | null {
+  const min = asPrice(minValue);
+  const max = asPrice(maxValue);
+  if (min === null || max === null || (min === 0 && max === 0)) {
+    return null;
+  }
+
+  return { min: Math.min(min, max), max: Math.max(min, max) };
+}
+
+const MODELS = [
+  { id: "gemini-2.5-flash", timeoutMs: 8_000 },
+  { id: "gemini-3.8-flash", timeoutMs: 12_000 },
+  { id: "gemini-3.5-flash-lite", timeoutMs: 18_000 },
+  { id: "gemini-flash-lite-latest", timeoutMs: 12_000 },
+] as const;
 
 export const maxDuration = 60;
 
@@ -170,7 +207,7 @@ export async function POST(request: Request) {
       try {
         response = await withTimeout(
           ai.models.generateContent({
-            model,
+            model: model.id,
             contents: [
               { text: PROMPT },
               { inlineData: coverImage },
@@ -187,19 +224,29 @@ export async function POST(request: Request) {
                   publisher: { type: Type.STRING },
                   isbn: { type: Type.STRING },
                   year: { type: Type.STRING },
+                  preco_minimo_sugerido: { type: Type.NUMBER },
+                  preco_maximo_sugerido: { type: Type.NUMBER },
                 },
-                required: ["title", "author", "publisher", "isbn", "year"],
+                required: [
+                  "title",
+                  "author",
+                  "publisher",
+                  "isbn",
+                  "year",
+                  "preco_minimo_sugerido",
+                  "preco_maximo_sugerido",
+                ],
               },
             },
           }),
-          MODEL_TIMEOUT_MS,
+          model.timeoutMs,
         );
         lastError = undefined;
         break;
       } catch (error) {
         lastError = error;
         const code = errorCode(error);
-        console.error("extract-book model", model, code ?? "unknown");
+        console.error("extract-book model", model.id, code ?? "unknown");
         if (!isOverloaded(error) && !isMissingModel(error)) throw error;
       }
     }
@@ -207,12 +254,15 @@ export async function POST(request: Request) {
     if (!response) throw lastError ?? new Error("Nenhum modelo Gemini respondeu.");
 
     const data = readJson(response.text);
+    const prices = priceRange(data.preco_minimo_sugerido, data.preco_maximo_sugerido);
     const book: BookFields = {
       title: asText(data.title),
       author: asText(data.author),
       publisher: asText(data.publisher),
       isbn: cleanIsbn(asText(data.isbn)),
       year: cleanYear(asText(data.year)),
+      preco_minimo_sugerido: prices?.min ?? 0,
+      preco_maximo_sugerido: prices?.max ?? 0,
     };
 
     return NextResponse.json(book);
